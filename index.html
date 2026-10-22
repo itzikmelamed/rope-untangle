@@ -1,119 +1,171 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <meta name="theme-color" content="#14281f"><title>Untangle</title>
 <style>
-*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;user-select:none}
-html,body{margin:0;height:100%;background:linear-gradient(#1d3b2d,#0f1f18);color:#fff;font-family:system-ui,sans-serif;overflow:hidden;touch-action:none}
-#top{position:fixed;top:0;left:0;right:0;display:flex;justify-content:space-between;align-items:center;padding:14px 18px;font-size:22px;font-weight:700;pointer-events:none}
-#lvl{background:#ffffff18;padding:6px 16px;border-radius:20px}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none}
+html,body{margin:0;height:100%;background:linear-gradient(#1f4030,#0d1b14);color:#fff;font-family:system-ui,-apple-system,sans-serif;overflow:hidden;touch-action:none;overscroll-behavior:none}
 canvas{position:fixed;inset:0;width:100%;height:100%}
-#bar{position:fixed;bottom:0;left:0;right:0;display:flex;justify-content:center;gap:16px;padding:18px}
-button{font-size:26px;width:64px;height:56px;border:0;border-radius:16px;background:#ffffff1f;color:#fff}
-button:active{background:#ffffff40}
-#win{position:fixed;inset:0;background:#000a;display:none;flex-direction:column;align-items:center;justify-content:center;font-size:70px;gap:20px}
-#win button{width:150px;font-size:40px;background:#4caf50;height:70px}
-#win.show{display:flex}
+#top{position:fixed;top:0;left:0;right:0;display:flex;justify-content:center;align-items:center;gap:14px;padding:max(14px,env(safe-area-inset-top)) 16px 0;pointer-events:none}
+.pill{background:#ffffff1c;padding:8px 20px;border-radius:24px;font-weight:800;font-size:22px;letter-spacing:.5px}
+#lvl{font-size:26px;background:#ffffff26}
+#bar{position:fixed;bottom:0;left:0;right:0;display:flex;justify-content:center;gap:14px;padding:16px 16px max(18px,env(safe-area-inset-bottom))}
+button{font-size:26px;width:68px;height:60px;border:0;border-radius:18px;background:#ffffff22;color:#fff;transition:transform .1s,background .1s}
+button:active{transform:scale(.92);background:#ffffff48}
+button.off{opacity:.3}
+#toast{position:fixed;top:44%;left:0;right:0;text-align:center;font-size:64px;font-weight:900;pointer-events:none;opacity:0;text-shadow:0 4px 20px #000a}
+#toast.show{animation:pop 1.3s ease-out}
+@keyframes pop{0%{opacity:0;transform:scale(.4)}20%{opacity:1;transform:scale(1.15)}35%{transform:scale(1)}80%{opacity:1}100%{opacity:0;transform:scale(1.05)}}
 </style></head><body>
 <canvas id="c"></canvas>
-<div id="top"><span>🪢</span><span id="lvl">1</span><span id="cr">0</span></div>
-<div id="bar"><button id="reset">🔄</button><button id="skip">⏭</button></div>
-<div id="win"><div>🎉</div><button id="next">▶</button></div>
+<div id="top"><span class="pill" id="lvl">1</span><span class="pill" id="cr">0</span></div>
+<div id="toast">⭐</div>
+<div id="bar"><button id="undo" aria-label="undo">↩</button><button id="hint" aria-label="hint">💡</button><button id="reset" aria-label="restart">🔄</button><button id="skip" aria-label="skip">⏭</button></div>
 <script>
 const cv=document.getElementById('c'),ctx=cv.getContext('2d'),$=id=>document.getElementById(id);
-let W,H,dpr=window.devicePixelRatio||1;
-function resize(){W=innerWidth;H=innerHeight;cv.width=W*dpr;cv.height=H*dpr;ctx.setTransform(dpr,0,0,dpr,0,0);draw()}
+let W,H,dpr=Math.min(window.devicePixelRatio||1,3);
+function resize(){W=innerWidth;H=innerHeight;cv.width=W*dpr;cv.height=H*dpr;ctx.setTransform(dpr,0,0,dpr,0,0)}
 addEventListener('resize',resize);
-let level=+localStorage.getItem('ut_level')||1,pts=[],edges=[],drag=-1,solved=false,bad=new Set();
+const save=()=>localStorage.setItem('ut_level',level);
+let level=+localStorage.getItem('ut_level')||1;
+let pts=[],edges=[],sol=[],hist=[],drag=-1,solved=false,bad=new Set(),parts=[],winT=0,hintT=0,demo=false,grabOff={x:0,y:0};
+// --- sound / haptics
+let actx;function tone(f,d=.09,v=.07,type='sine',when=0){try{actx=actx||new (window.AudioContext||window.webkitAudioContext)();const t=actx.currentTime+when,o=actx.createOscillator(),g=actx.createGain();o.type=type;o.frequency.value=f;g.gain.setValueAtTime(v,t);g.gain.exponentialRampToValueAtTime(.0005,t+d);o.connect(g);g.connect(actx.destination);o.start(t);o.stop(t+d)}catch(e){}}
+const vib=n=>{try{navigator.vibrate&&navigator.vibrate(n)}catch(e){}};
+// --- geometry
 function rng(seed){return()=>{seed=(seed*1664525+1013904223)>>>0;return seed/4294967296}}
-function cross(a,b,c,d){
-  const o=(p,q,r)=>(q.x-p.x)*(r.y-p.y)-(q.y-p.y)*(r.x-p.x);
-  return o(a,b,c)*o(a,b,d)<0&&o(c,d,a)*o(c,d,b)<0;
-}
+function cross(a,b,c,d){const o=(p,q,r)=>(q.x-p.x)*(r.y-p.y)-(q.y-p.y)*(r.x-p.x);return o(a,b,c)*o(a,b,d)<0&&o(c,d,a)*o(c,d,b)<0}
+function crossings(P){const s=new Set();for(let i=0;i<edges.length;i++)for(let j=i+1;j<edges.length;j++){const[a,b]=edges[i],[c,d]=edges[j];if(a===c||a===d||b===c||b===d)continue;if(cross(P[a],P[b],P[c],P[d])){s.add(i);s.add(j)}}return s}
+function count(P){let n=0;for(let i=0;i<edges.length;i++)for(let j=i+1;j<edges.length;j++){const[a,b]=edges[i],[c,d]=edges[j];if(a===c||a===d||b===c||b===d)continue;if(cross(P[a],P[b],P[c],P[d]))n++}return n}
+function farEnough(P,p,skip,m){return P.every((q,i)=>i===skip||Math.hypot(q.x-p.x,(q.y-p.y)*1.5)>m)}
 function gen(l){
-  if(l===1){edges=[[0,1],[1,2],[2,3],[3,0]];pts=[{x:.2,y:.25},{x:.8,y:.7},{x:.8,y:.25},{x:.2,y:.7}];calc();return}
-  gen2(l)}
-function gen2(l){
-  const n=Math.min(4+Math.ceil(l*0.6),22),r=rng(l*104729+7),ratio=Math.min(1.6,1+0.07*l);
-  // random planar graph: random points, add non-crossing edges shortest first
-  const P=[];for(let i=0;i<n;i++)P.push({x:r(),y:r()});
-  const cand=[];for(let i=0;i<n;i++)for(let j=i+1;j<n;j++)cand.push([i,j,Math.hypot(P[i].x-P[j].x,P[i].y-P[j].y)]);
+  if(l===1){edges=[[0,1],[1,2],[2,3],[3,0]];sol=[{x:.2,y:.25},{x:.8,y:.7},{x:.8,y:1},{x:.2,y:.7}];pts=[{x:.2,y:.25},{x:.8,y:.7},{x:.8,y:.25},{x:.2,y:.7}];return}
+  const n=Math.min(4+Math.floor((l-1)/4),18),r=rng(l*104729+7);
+  const extra=Math.min(1+Math.floor(l/4),Math.floor(n*.6));
+  const m=n-1+extra;
+  const P=[];let g=0;
+  if(n<=8){const a0=r()*6.28;for(let i=0;i<n;i++){const a=a0+i/n*6.283+(r()-.5)*.5,rad=.78+r()*.2;P.push({x:.5+.45*rad*Math.cos(a),y:.5+.48*rad*Math.sin(a)})}}
+  while(P.length<n&&P.length>0&&g++<3000){const p={x:.08+r()*.84,y:.05+r()*.9};if(farEnough(P,p,-1,.27-n*.006))P.push(p)}
+  while(P.length<n)P.push({x:r(),y:r()});
+  const cand=[];for(let i=0;i<n;i++)for(let j=i+1;j<n;j++)cand.push([i,j,Math.hypot(P[i].x-P[j].x,(P[i].y-P[j].y)*1.5)]);
   cand.sort((a,b)=>a[2]-b[2]);const E=[];
-  for(const [i,j] of cand){
-    if(E.length>=Math.floor(n*ratio))break;
-    if(!E.some(([a,b])=>a!==i&&a!==j&&b!==i&&b!==j&&cross(P[a],P[b],P[i],P[j])))E.push([i,j]);
+  for(const[i,j]of cand){if(E.length>=m)break;if(!E.some(([a,b])=>a!==i&&a!==j&&b!==i&&b!==j&&cross(P[a],P[b],P[i],P[j])))E.push([i,j])}
+  edges=E;sol=P.map(p=>({...p}));
+  const k=l<=10?1:l<=25?2:Math.min(Math.ceil(n/2),2+Math.floor((l-25)/10));
+  const lo=1,hi=l<=10?2:l<=25?3+Math.floor(l/8):6+Math.floor((l-25)/4);
+  let best=null;
+  for(let t=0;t<600;t++){
+    const Q=P.map(p=>({...p}));
+    const ids=[...Array(n).keys()].sort(()=>r()-.5).slice(0,k);
+    for(const i of ids){let p,h=0;do{p={x:.06+r()*.88,y:.04+r()*.92}}while(!farEnough(Q,p,i,.13)&&h++<30);Q[i]=p}
+    const c=count(Q);
+    if(c>=lo&&c<=hi){best=Q;break}
+    if(c>=lo&&(!best||c<count(best)))best=Q;
   }
-  edges=E;
-  // scramble: place on a circle in random order (guaranteed tangled)
-  let tries=0;
-  do{
-    const order=[...Array(n).keys()].sort(()=>r()-.5);
-    pts=order.map((o,k)=>({x:.5+.4*Math.cos(k/n*6.283),y:.5+.4*Math.sin(k/n*6.283)}));
-    const tmp=[];order.forEach((o,k)=>tmp[o]=pts[k]);pts=tmp;
-    tries++;calc();
-  }while(bad.size<Math.max(2,E.length/5)&&tries<40);
+  pts=(best||P.map(p=>({x:1-p.x,y:p.y}))).map(p=>({...p}));
 }
-function px(p){const m=40,top=70,bot=100;return{x:m+p.x*(W-2*m),y:top+p.y*(H-top-bot)}}
-function calc(){
-  bad=new Set();
-  for(let i=0;i<edges.length;i++)for(let j=i+1;j<edges.length;j++){
-    const [a,b]=edges[i],[c,d]=edges[j];
-    if(a===c||a===d||b===c||b===d)continue;
-    if(cross(pts[a],pts[b],pts[c],pts[d])){bad.add(i);bad.add(j)}
-  }
-  const el=$('cr');if(el)el.textContent=bad.size?'✂ '+bad.size:'✓';
+// --- layout
+const M=46,TOP=96,BOT=110;
+const px=p=>({x:M+p.x*(W-2*M),y:TOP+p.y*(H-TOP-BOT)});
+const unpx=(x,y)=>({x:Math.max(0,Math.min(1,(x-M)/(W-2*M))),y:Math.max(0,Math.min(1,(y-TOP)/(H-TOP-BOT)))});
+let vis=[];// smoothed visual positions
+function setBad(){const nb=crossings(pts);const prev=bad.size;bad=nb;const el=$('cr');el.textContent=bad.size?'✂ '+(count(pts)):'✓';return prev}
+// --- draw
+let last=0;
+function frame(ts){
+  const dt=Math.min(40,ts-last||16);last=ts;
+  // ease visual positions
+  pts.forEach((p,i)=>{const v=vis[i]||(vis[i]={x:p.x,y:p.y});const k=i===drag?1-Math.pow(.0004,dt/100):1-Math.pow(.002,dt/100);v.x+=(p.x-v.x)*k;v.y+=(p.y-v.y)*k});
+  // hint animation moves the real point
+  if(hintT>0){hintT-=dt}
+  ctx.clearRect(0,0,W,H);ctx.lineCap='round';
+  const gold=winT>0;if(gold)winT-=dt;
+  edges.forEach(([a,b],i)=>{
+    const A=px(vis[a]),B=px(vis[b]);
+    const col=gold?'#ffe066':bad.has(i)?'#ff5a5a':'#7dffa0';
+    ctx.strokeStyle='#0005';ctx.lineWidth=11;ctx.beginPath();ctx.moveTo(A.x+2,A.y+4);ctx.lineTo(B.x+2,B.y+4);ctx.stroke();
+    ctx.strokeStyle=col;ctx.lineWidth=7;ctx.beginPath();ctx.moveTo(A.x,A.y);ctx.lineTo(B.x,B.y);ctx.stroke();
+    ctx.strokeStyle='#fff5';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(A.x-1,A.y-1);ctx.lineTo(B.x-1,B.y-1);ctx.stroke();
+  });
+  vis.forEach((p,i)=>{
+    const q=px(p),big=i===drag,R=big?27:21;
+    if(big){ctx.beginPath();ctx.arc(q.x,q.y,R+10,0,7);ctx.fillStyle='#ffffff2a';ctx.fill()}
+    ctx.beginPath();ctx.arc(q.x,q.y+3,R,0,7);ctx.fillStyle='#0006';ctx.fill();
+    const gr=ctx.createRadialGradient(q.x-6,q.y-7,2,q.x,q.y,R);gr.addColorStop(0,'#fff3a8');gr.addColorStop(1,gold?'#ffc400':big?'#ffd23d':'#f2b81c');
+    ctx.beginPath();ctx.arc(q.x,q.y,R,0,7);ctx.fillStyle=gr;ctx.fill();ctx.lineWidth=3;ctx.strokeStyle='#0007';ctx.stroke();
+  });
+  drawDemo(ts);
+  // particles
+  parts=parts.filter(p=>p.life>0);
+  parts.forEach(p=>{p.life-=dt;p.x+=p.vx*dt/16;p.y+=p.vy*dt/16;p.vy+=.18*dt/16;ctx.globalAlpha=Math.max(0,p.life/1200);ctx.fillStyle=p.c;ctx.fillRect(p.x,p.y,p.s,p.s*.6);});
+  ctx.globalAlpha=1;
+  requestAnimationFrame(frame);
 }
-let t0=0;
-let demo=false,dt=0;
-function demoLoop(ts){
-  if(!demo)return;dt=ts;draw();requestAnimationFrame(demoLoop)}
-function drawDemo(){
+function drawDemo(ts){
   if(!demo)return;
-  const A=px({x:.8,y:.25}),B=px({x:.8,y:1.0}),ph=(dt%2400)/2400;
-  const k=ph<.15?0:ph<.75?(ph-.15)/.6:1, e=k<.5?2*k*k:1-Math.pow(-2*k+2,2)/2;
+  const A=px({x:.8,y:.25}),B=px({x:.8,y:1.0}),ph=(ts%2600)/2600;
+  const k=ph<.15?0:ph<.75?(ph-.15)/.6:1,e=k<.5?2*k*k:1-Math.pow(-2*k+2,2)/2;
   const x=A.x+(B.x-A.x)*e,y=A.y+(B.y-A.y)*e;
   ctx.setLineDash([8,10]);ctx.strokeStyle='#fff9';ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(A.x,A.y);ctx.lineTo(B.x,B.y);ctx.stroke();ctx.setLineDash([]);
-  ctx.beginPath();ctx.arc(A.x,A.y,17+6*Math.sin(dt/200),0,7);ctx.strokeStyle='#fff';ctx.lineWidth=3;ctx.stroke();
-  ctx.beginPath();ctx.arc(x,y+14,20,0,7);ctx.fillStyle='#ffffffbb';ctx.fill();
-  ctx.beginPath();ctx.arc(x,y+14,10,0,7);ctx.fillStyle='#ffffffee';ctx.fill();
+  ctx.beginPath();ctx.arc(A.x,A.y,26+5*Math.sin(ts/200),0,7);ctx.strokeStyle='#fff';ctx.lineWidth=3;ctx.stroke();
+  ctx.beginPath();ctx.arc(x,y+16,22,0,7);ctx.fillStyle='#ffffffaa';ctx.fill();
+  ctx.beginPath();ctx.arc(x,y+16,11,0,7);ctx.fillStyle='#fffffff0';ctx.fill();
 }
-function draw(){
-  ctx.clearRect(0,0,W,H);ctx.lineCap='round';
-  edges.forEach(([a,b],i)=>{
-    const A=px(pts[a]),B=px(pts[b]);
-    const col=bad.has(i)?'#ff5a5a':'#7dffa0';
-    ctx.strokeStyle='#0006';ctx.lineWidth=9;ctx.beginPath();ctx.moveTo(A.x+2,A.y+3);ctx.lineTo(B.x+2,B.y+3);ctx.stroke();
-    ctx.strokeStyle=col;ctx.lineWidth=6;ctx.beginPath();ctx.moveTo(A.x,A.y);ctx.lineTo(B.x,B.y);ctx.stroke();
-  });
-  pts.forEach((p,i)=>{
-    const q=px(p);ctx.beginPath();ctx.arc(q.x,q.y,i===drag?22:17,0,7);
-    ctx.fillStyle=i===drag?'#fff':'#ffd23d';ctx.fill();ctx.lineWidth=3;ctx.strokeStyle='#0008';ctx.stroke();
-  });
-  drawDemo();
-}
-function pos(e){const t=e.touches?e.touches[0]:e;return{x:t.clientX,y:t.clientY}}
+// --- input
+function pos(e){const t=(e.touches&&e.touches[0])||(e.changedTouches&&e.changedTouches[0])||e;return{x:t.clientX,y:t.clientY}}
 function down(e){
-  if(solved)return;demo=false;const m=pos(e);let best=-1,bd=34;
-  pts.forEach((p,i)=>{const q=px(p),d=Math.hypot(q.x-m.x,q.y-m.y);if(d<bd){bd=d;best=i}});
-  drag=best;draw();
+  if(solved)return;e.preventDefault();demo=false;
+  const m=pos(e);let best=-1,bd=58;
+  pts.forEach((p,i)=>{const q=px(vis[i]||p),d=Math.hypot(q.x-m.x,q.y-m.y);if(d<bd){bd=d;best=i}});
+  if(best<0)return;
+  drag=best;const q=px(pts[best]);grabOff={x:q.x-m.x,y:q.y-m.y};
+  hist.push(pts.map(p=>({...p})));$('undo').classList.remove('off');
+  tone(380,.06,.06);vib(8);
 }
 function move(e){
-  if(drag<0)return;e.preventDefault();const m=pos(e),mm=40,top=70,bot=100;
-  pts[drag].x=Math.max(0,Math.min(1,(m.x-mm)/(W-2*mm)));
-  pts[drag].y=Math.max(0,Math.min(1,(m.y-top)/(H-top-bot)));
-  calc();draw();
+  if(drag<0)return;e.preventDefault();const m=pos(e);
+  const u=unpx(m.x+grabOff.x,m.y+grabOff.y);pts[drag].x=u.x;pts[drag].y=u.y;
+  const before=count(pts),prev=bad.size;setBad();
 }
-function up(){
-  if(drag>=0){drag=-1;draw();
-    if(!bad.size&&!solved){solved=true;level++;localStorage.setItem('ut_level',level);
-      if(navigator.vibrate)navigator.vibrate(150);
-      setTimeout(()=>$('win').classList.add('show'),300)}}
+let lastC=0;
+function up(e){
+  if(drag<0)return;const i=drag;drag=-1;
+  const c=count(pts);
+  if(JSON.stringify(hist[hist.length-1])===JSON.stringify(pts)){hist.pop()} // no change
+  tone(c<lastC?720:300,.08,.06);if(c<lastC)vib(14);lastC=c;
+  setBad();
+  if(!bad.size)win();
 }
-cv.addEventListener('touchstart',down,{passive:false});cv.addEventListener('touchmove',move,{passive:false});cv.addEventListener('touchend',up);
+function win(){
+  solved=true;level++;save();winT=1500;
+  vib([30,40,60]);[523,659,784,1047].forEach((f,i)=>tone(f,.25,.08,'triangle',i*.1));
+  const t=$('toast');t.classList.remove('show');void t.offsetWidth;t.classList.add('show');
+  for(let i=0;i<90;i++)parts.push({x:W/2,y:H*.45,vx:(Math.random()-.5)*14,vy:-Math.random()*12-2,s:6+Math.random()*7,life:900+Math.random()*500,c:['#ffe066','#7dffa0','#ff8fa3','#8ecbff','#fff'][i%5]});
+  setTimeout(start,1500);
+}
+function start(){
+  solved=false;winT=0;hist=[];drag=-1;demo=(level===1);
+  gen(level);vis=pts.map(p=>({...p}));setBad();lastC=count(pts);
+  $('lvl').textContent='Level '+level;$('undo').classList.add('off');
+}
+function hint(){
+  if(solved)return;demo=false;
+  let bi=-1,bv=-1;
+  for(let i=0;i<pts.length;i++){
+    const d=Math.hypot(pts[i].x-sol[i].x,pts[i].y-sol[i].y);if(d<.02)continue;
+    const T=pts.map(p=>({...p}));T[i]={...sol[i]};const c=count(T);
+    const score=(count(pts)-c)*10+d;if(score>bv){bv=score;bi=i}
+  }
+  if(bi<0)return;
+  hist.push(pts.map(p=>({...p})));$('undo').classList.remove('off');
+  pts[bi]={...sol[bi]};tone(880,.15,.06);vib(10);setBad();lastC=count(pts);
+  if(!bad.size)setTimeout(win,500);
+}
+function undo(){if(!hist.length||solved)return;pts=hist.pop();setBad();lastC=count(pts);tone(260,.08,.06);if(!hist.length)$('undo').classList.add('off')}
+cv.addEventListener('touchstart',down,{passive:false});cv.addEventListener('touchmove',move,{passive:false});cv.addEventListener('touchend',up);cv.addEventListener('touchcancel',up);
 cv.addEventListener('mousedown',down);addEventListener('mousemove',move);addEventListener('mouseup',up);
-function start(){demo=(level===1);if(demo)requestAnimationFrame(demoLoop);solved=false;$('win').classList.remove('show');$('lvl').textContent=level;gen(level);draw()}
-$('reset').onclick=start;
-$('skip').onclick=()=>{level++;localStorage.setItem('ut_level',level);start()};
-$('next').onclick=start;
-resize();start();
+$('reset').onclick=()=>{if(!solved)start()};
+$('skip').onclick=()=>{if(solved)return;level++;save();start()};
+$('undo').onclick=undo;$('hint').onclick=hint;
+resize();start();requestAnimationFrame(frame);
 </script></body></html>
